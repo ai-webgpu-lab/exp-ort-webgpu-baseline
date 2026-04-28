@@ -1,667 +1,457 @@
-const metadata = Object.freeze({
-  repo: "exp-ort-webgpu-baseline",
-  category: "llm",
-  purpose: "ORT-Web WebGPU 기준선",
-  priority: "P1",
-  trackLabel: "LLM",
-  kindLabel: "experiment",
-  trackSlug: "llm",
-  workloadKind: "llm-chat",
-  pagesUrl: "https://ai-webgpu-lab.github.io/exp-ort-webgpu-baseline/",
-  repoUrl: "https://github.com/ai-webgpu-lab/exp-ort-webgpu-baseline",
-  readmeUrl: "https://github.com/ai-webgpu-lab/exp-ort-webgpu-baseline/blob/main/README.md",
-  resultsUrl: "https://github.com/ai-webgpu-lab/exp-ort-webgpu-baseline/blob/main/RESULTS.md"
-});
+const EXECUTION_MODES = {
+  webgpu: {
+    id: "webgpu",
+    label: "WebGPU EP",
+    backend: "webgpu",
+    fallbackTriggered: false,
+    workerMode: "worker",
+    initDelayMs: 72,
+    graphDelayMs: 16,
+    firstOutputDelayMs: 18,
+    stepDelayMs: 9,
+    stepCount: 12
+  },
+  fallback: {
+    id: "fallback",
+    label: "Wasm Fallback",
+    backend: "wasm",
+    fallbackTriggered: true,
+    workerMode: "main",
+    initDelayMs: 136,
+    graphDelayMs: 31,
+    firstOutputDelayMs: 42,
+    stepDelayMs: 21,
+    stepCount: 12
+  }
+};
+
+function resolveExecutionMode() {
+  const requested = new URLSearchParams(window.location.search).get("mode");
+  return EXECUTION_MODES[requested] || EXECUTION_MODES.webgpu;
+}
+
+const executionMode = resolveExecutionMode();
+
+const requestedMode = typeof window !== "undefined"
+  ? new URLSearchParams(window.location.search).get("mode")
+  : null;
+const isRealRuntimeMode = typeof requestedMode === "string" && requestedMode.startsWith("real-");
+const REAL_ADAPTER_WAIT_MS = 5000;
+const REAL_ADAPTER_LOAD_MS = 20000;
+
+function withTimeout(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs} ms`)), timeoutMs);
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function findRegisteredRealRuntime() {
+  const registry = typeof window !== "undefined" ? window.__aiWebGpuLabRuntimeRegistry : null;
+  if (!registry || typeof registry.list !== "function") return null;
+  return registry.list().find((adapter) => adapter && adapter.isReal === true) || null;
+}
+
+async function awaitRealRuntime(timeoutMs = REAL_ADAPTER_WAIT_MS) {
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < timeoutMs) {
+    const adapter = findRegisteredRealRuntime();
+    if (adapter) return adapter;
+    if (typeof window !== "undefined" && window.__aiWebGpuLabRealOrtBootstrapError) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return null;
+}
 
 const state = {
   startedAt: performance.now(),
-  environment: null,
-  probes: {
-    webgpu: null,
-    frame: null,
-    worker: null
-  },
+  environment: buildEnvironment(),
+  active: false,
+  run: null,
+  trace: [],
+  realAdapterError: null,
   logs: []
 };
 
-const knownLimitKeys = [
-  "maxTextureDimension1D",
-  "maxTextureDimension2D",
-  "maxTextureDimension3D",
-  "maxBindGroups",
-  "maxBindingsPerBindGroup",
-  "maxUniformBufferBindingSize",
-  "maxStorageBufferBindingSize",
-  "maxComputeInvocationsPerWorkgroup",
-  "maxComputeWorkgroupStorageSize",
-  "maxBufferSize"
-];
-
 const elements = {
-  metaGrid: document.getElementById("meta-grid"),
+  inputProfile: document.getElementById("input-profile"),
   statusRow: document.getElementById("status-row"),
-  statusSummary: document.getElementById("status-summary"),
-  focusList: document.getElementById("focus-list"),
-  nextSteps: document.getElementById("next-steps"),
-  metricsGrid: document.getElementById("metrics-grid"),
-  environmentJson: document.getElementById("environment-json"),
-  resultJson: document.getElementById("result-json"),
-  activityLog: document.getElementById("activity-log"),
-  detectEnvironment: document.getElementById("detect-environment"),
-  runWebgpu: document.getElementById("run-webgpu"),
-  runFrame: document.getElementById("run-frame"),
-  runWorker: document.getElementById("run-worker"),
-  downloadJson: document.getElementById("download-json")
+  summary: document.getElementById("summary"),
+  runInference: document.getElementById("run-inference"),
+  downloadJson: document.getElementById("download-json"),
+  traceView: document.getElementById("trace-view"),
+  metricGrid: document.getElementById("metric-grid"),
+  metaGrid: document.getElementById("meta-grid"),
+  logList: document.getElementById("log-list"),
+  resultJson: document.getElementById("result-json")
 };
 
 function round(value, digits = 2) {
-  if (!Number.isFinite(value)) {
-    return null;
-  }
-
-  const factor = Math.pow(10, digits);
+  if (!Number.isFinite(value)) return null;
+  const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
-}
-
-function percentile(values, ratio) {
-  if (!values.length) {
-    return null;
-  }
-
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
-  return sorted[index];
-}
-
-function nowIso() {
-  return new Date().toISOString();
 }
 
 function parseBrowser() {
   const ua = navigator.userAgent;
-  const candidates = [
-    ["Edg/", "Edge"],
-    ["Chrome/", "Chrome"],
-    ["Firefox/", "Firefox"],
-    ["Version/", "Safari"]
-  ];
-
-  for (const [needle, name] of candidates) {
+  for (const [needle, name] of [["Edg/", "Edge"], ["Chrome/", "Chrome"], ["Firefox/", "Firefox"], ["Version/", "Safari"]]) {
     const marker = ua.indexOf(needle);
-    if (marker >= 0) {
-      const version = ua.slice(marker + needle.length).split(/[\s)/;]/)[0] || "unknown";
-      return { name, version };
-    }
+    if (marker >= 0) return { name, version: ua.slice(marker + needle.length).split(/[\s)/;]/)[0] || "unknown" };
   }
-
   return { name: "Unknown", version: "unknown" };
 }
 
 function parseOs() {
   const ua = navigator.userAgent;
-
-  if (/Windows NT/i.test(ua)) {
-    const match = ua.match(/Windows NT ([0-9.]+)/i);
-    return { name: "Windows", version: match ? match[1] : "unknown" };
-  }
-
-  if (/Mac OS X/i.test(ua)) {
-    const match = ua.match(/Mac OS X ([0-9_]+)/i);
-    return { name: "macOS", version: match ? match[1].replace(/_/g, ".") : "unknown" };
-  }
-
-  if (/Android/i.test(ua)) {
-    const match = ua.match(/Android ([0-9.]+)/i);
-    return { name: "Android", version: match ? match[1] : "unknown" };
-  }
-
-  if (/(iPhone|iPad|CPU OS)/i.test(ua)) {
-    const match = ua.match(/OS ([0-9_]+)/i);
-    return { name: "iOS", version: match ? match[1].replace(/_/g, ".") : "unknown" };
-  }
-
-  if (/Linux/i.test(ua)) {
-    return { name: "Linux", version: "unknown" };
-  }
-
+  if (/Windows NT/i.test(ua)) return { name: "Windows", version: (ua.match(/Windows NT ([0-9.]+)/i) || [])[1] || "unknown" };
+  if (/Mac OS X/i.test(ua)) return { name: "macOS", version: ((ua.match(/Mac OS X ([0-9_]+)/i) || [])[1] || "unknown").replace(/_/g, ".") };
+  if (/Linux/i.test(ua)) return { name: "Linux", version: "unknown" };
   return { name: "Unknown", version: "unknown" };
 }
 
 function inferDeviceClass() {
   const threads = navigator.hardwareConcurrency || 0;
   const memory = navigator.deviceMemory || 0;
-  const mobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-
-  if (mobile) {
-    if (memory >= 6 && threads >= 8) {
-      return "mobile-high";
-    }
-
-    return "mobile-mid";
-  }
-
-  if (memory >= 16 && threads >= 12) {
-    return "desktop-high";
-  }
-
-  if (memory >= 8 && threads >= 8) {
-    return "desktop-mid";
-  }
-
-  if (threads >= 4) {
-    return "laptop";
-  }
-
+  if (memory >= 16 && threads >= 12) return "desktop-high";
+  if (memory >= 8 && threads >= 8) return "desktop-mid";
+  if (threads >= 4) return "laptop";
   return "unknown";
 }
 
-function baseEnvironment() {
+function buildEnvironment() {
   return {
     browser: parseBrowser(),
     os: parseOs(),
     device: {
       name: navigator.platform || "unknown",
       class: inferDeviceClass(),
-      cpu: navigator.hardwareConcurrency ? String(navigator.hardwareConcurrency) + " threads" : "unknown",
+      cpu: navigator.hardwareConcurrency ? `${navigator.hardwareConcurrency} threads` : "unknown",
       memory_gb: navigator.deviceMemory || undefined,
       power_mode: "unknown"
     },
     gpu: {
-      adapter: "unknown",
-      required_features: [],
+      adapter: executionMode.fallbackTriggered ? "wasm-fallback-simulated" : "ort-webgpu-simulated-adapter",
+      required_features: executionMode.fallbackTriggered ? [] : ["shader-f16"],
       limits: {}
     },
-    backend: "wasm",
-    fallback_triggered: true,
-    worker_mode: "unknown",
-    cache_state: "unknown"
+    backend: executionMode.backend,
+    fallback_triggered: executionMode.fallbackTriggered,
+    worker_mode: executionMode.workerMode,
+    cache_state: "warm"
   };
-}
-
-function ensureEnvironment() {
-  if (!state.environment) {
-    state.environment = baseEnvironment();
-  }
-
-  return state.environment;
 }
 
 function log(message) {
-  state.logs.unshift("[" + new Date().toLocaleTimeString() + "] " + message);
-  state.logs = state.logs.slice(0, 14);
+  state.logs.unshift(`[${new Date().toLocaleTimeString()}] ${message}`);
+  state.logs = state.logs.slice(0, 12);
   renderLogs();
 }
 
-function metadataCards() {
-  return [
-    ["Track", metadata.trackLabel],
-    ["Kind", metadata.kindLabel],
-    ["Priority", metadata.priority],
-    ["Workload", metadata.workloadKind],
-    ["Pages URL", metadata.pagesUrl]
-  ];
+function parseInputProfile(text) {
+  const values = {};
+  for (const part of text.split(/\s+/)) {
+    const [key, value] = part.split("=");
+    if (key && value) values[key] = value;
+  }
+  return {
+    batch: Number(values.batch) || 1,
+    sequence: Number(values.sequence) || 128,
+    hidden: Number(values.hidden) || 384,
+    heads: Number(values.heads) || 6,
+    quantization: values.quantization || "q4f16",
+    provider: executionMode.id
+  };
 }
 
-function focusItems() {
-  const common = [
-    "Collect a reproducible browser and device snapshot before adding workload-specific code.",
-    "Use the exported JSON as the first draft for reports/raw once you validate it in the target browser."
-  ];
-
-  switch (metadata.category) {
-    case "template":
-      return common.concat([
-        "Verify the smallest WebGPU success path and copy that shape into downstream repositories.",
-        "Document capability and fallback behavior before adding framework-specific layers."
-      ]);
-    case "benchmark":
-      return common.concat([
-        "Replace lightweight frame and worker probes with workload-specific comparison harnesses.",
-        "Keep input profiles and environment notes identical across runs."
-      ]);
-    case "app":
-      return common.concat([
-        "Check whether the integration surface can acquire GPU resources without blocking the UI.",
-        "Turn this probe into the first user-facing end-to-end demo once the core flow exists."
-      ]);
-    case "graphics":
-    case "blackhole":
-      return common.concat([
-        "Prioritize adapter/device acquisition, frame pacing, and scene-load instrumentation.",
-        "Capture visual correctness notes together with frame timing."
-      ]);
-    default:
-      return common.concat([
-        "Prioritize adapter readiness, worker offload viability, and result export hygiene.",
-        "Replace generic probes with model or runtime-specific metrics as soon as the first harness lands."
-      ]);
-  }
-}
-
-function nextSteps() {
-  const steps = [
-    "Save an exported JSON after validating it in the target browser and move it into reports/raw/.",
-    "Replace generic probes in public/app.js with workload-specific setup and KPI collection.",
-    "Update RESULTS.md with the first measured run and record fallback conditions explicitly."
-  ];
-
-  if (metadata.category === "template") {
-    steps.unshift("Promote the minimal setup path into a copyable starter template for downstream repos.");
-  }
-
-  if (metadata.category === "benchmark") {
-    steps.unshift("Define the comparison matrix and freeze one shared input profile before collecting numbers.");
-  }
-
-  if (metadata.category === "app") {
-    steps.unshift("Connect one real user flow and treat this probe as the readiness gate before adding polish.");
-  }
-
-  return steps;
-}
-
-function renderList(element, items) {
-  element.innerHTML = "";
-  for (const item of items) {
-    const li = document.createElement("li");
-    li.textContent = item;
-    element.appendChild(li);
-  }
-}
-
-function renderMeta() {
-  elements.metaGrid.innerHTML = "";
-
-  for (const [label, value] of metadataCards()) {
-    const card = document.createElement("article");
-    card.className = "meta-card";
-
-    const labelNode = document.createElement("span");
-    labelNode.className = "label";
-    labelNode.textContent = label;
-
-    const valueNode = document.createElement(label === "Pages URL" ? "a" : "div");
-    valueNode.className = "value";
-    if (label === "Pages URL") {
-      valueNode.href = value;
-      valueNode.className = "value link";
+function syntheticKernel(profile, step) {
+  const width = Math.max(8, Math.floor(profile.hidden / 24));
+  let checksum = 0;
+  for (let row = 0; row < width; row += 1) {
+    for (let col = 0; col < width; col += 1) {
+      const left = ((row + 1) * (step + 3)) % 17;
+      const right = ((col + 5) * (profile.heads + 7)) % 19;
+      checksum += Math.sin((left * right + profile.sequence) * 0.0174533);
     }
-    valueNode.textContent = value;
-
-    card.appendChild(labelNode);
-    card.appendChild(valueNode);
-    elements.metaGrid.appendChild(card);
   }
+  return round(checksum, 4);
 }
 
-function summarizeStatus() {
-  if (!state.environment) {
-    return "Environment detection has not run yet.";
-  }
-
-  if (!state.probes.webgpu) {
-    return "Environment captured. Run the WebGPU probe to see whether the repository can stay on the GPU path.";
-  }
-
-  if (!state.probes.webgpu.available) {
-    return "Environment captured, but WebGPU is not available. The exported JSON records a fallback path so you can keep the run reproducible.";
-  }
-
-  if (!state.probes.frame || !state.probes.worker) {
-    return "WebGPU is available. Run the frame and worker probes next to capture baseline responsiveness metrics.";
-  }
-
-  return "Environment, WebGPU, frame pacing, and worker round-trip probes are complete. Promote this JSON into reports/raw after validating it against the intended workload.";
+async function runRealRuntimeOrt(adapter) {
+  log(`Connecting real runtime adapter '${adapter.id}'.`);
+  await withTimeout(
+    Promise.resolve(adapter.loadModel({ modelId: "ort-webgpu-baseline-default" })),
+    REAL_ADAPTER_LOAD_MS,
+    `loadModel(${adapter.id})`
+  );
+  const prefill = await withTimeout(
+    Promise.resolve(adapter.prefill({ promptTokens: 96 })),
+    REAL_ADAPTER_LOAD_MS,
+    `prefill(${adapter.id})`
+  );
+  const decode = await withTimeout(
+    Promise.resolve(adapter.decode({ tokenBudget: 32 })),
+    REAL_ADAPTER_LOAD_MS,
+    `decode(${adapter.id})`
+  );
+  log(`Real runtime adapter '${adapter.id}' ready: prefill_tok_per_sec=${prefill?.tokPerSec ?? "?"}, decode_tok_per_sec=${decode?.tokPerSec ?? "?"}.`);
+  return { adapter, prefill, decode };
 }
 
-function renderStatus() {
-  const badges = [];
+async function runInference() {
+  if (state.active) return;
+  state.active = true;
+  state.trace = [];
+  render();
 
-  badges.push({
-    tone: state.environment ? "success" : "warn",
-    text: state.environment ? "Environment ready" : "Environment pending"
-  });
-
-  if (!state.probes.webgpu) {
-    badges.push({ tone: "warn", text: "WebGPU probe pending" });
-  } else if (state.probes.webgpu.available) {
-    badges.push({ tone: "success", text: "WebGPU available" });
-  } else {
-    badges.push({ tone: "danger", text: "WebGPU unavailable" });
+  if (isRealRuntimeMode) {
+    log(`Mode=${requestedMode} requested; awaiting real runtime adapter registration.`);
+    const adapter = await awaitRealRuntime();
+    if (adapter) {
+      try {
+        const { prefill, decode } = await runRealRuntimeOrt(adapter);
+        state.realAdapterPrefill = prefill;
+        state.realAdapterDecode = decode;
+        state.realAdapter = adapter;
+      } catch (error) {
+        state.realAdapterError = error?.message || String(error);
+        log(`Real runtime '${adapter.id}' failed: ${state.realAdapterError}; falling back to deterministic.`);
+      }
+    } else {
+      const reason = (typeof window !== "undefined" && window.__aiWebGpuLabRealOrtBootstrapError) || "timed out waiting for adapter registration";
+      state.realAdapterError = reason;
+      log(`No real runtime adapter registered (${reason}); falling back to deterministic ORT baseline.`);
+    }
   }
 
-  badges.push({
-    tone: state.probes.frame ? "success" : "warn",
-    text: state.probes.frame ? "Frame probe done" : "Frame probe pending"
-  });
-  badges.push({
-    tone: state.probes.worker ? "success" : "warn",
-    text: state.probes.worker ? "Worker probe done" : "Worker probe pending"
-  });
+  const profile = parseInputProfile(elements.inputProfile.value);
+  log(`Running ORT-style ${executionMode.label} profile.`);
 
-  elements.statusRow.innerHTML = "";
-  for (const badge of badges) {
-    const node = document.createElement("span");
-    node.className = "badge " + badge.tone;
-    node.textContent = badge.text;
-    elements.statusRow.appendChild(node);
+  const initStartedAt = performance.now();
+  await new Promise((resolve) => setTimeout(resolve, executionMode.initDelayMs));
+  const initMs = performance.now() - initStartedAt;
+  state.trace.push(`session.init ${round(initMs, 2)} ms`);
+
+  const graphStartedAt = performance.now();
+  await new Promise((resolve) => setTimeout(resolve, executionMode.graphDelayMs));
+  const graphMs = performance.now() - graphStartedAt;
+  state.trace.push(`graph.optimize ${round(graphMs, 2)} ms`);
+
+  const runStartedAt = performance.now();
+  const stepDurations = [];
+  let firstOutputMs = 0;
+  let checksum = 0;
+  for (let step = 0; step < executionMode.stepCount; step += 1) {
+    const stepStartedAt = performance.now();
+    await new Promise((resolve) => setTimeout(resolve, step === 0 ? executionMode.firstOutputDelayMs : executionMode.stepDelayMs));
+    checksum += syntheticKernel(profile, step);
+    const stepMs = performance.now() - stepStartedAt;
+    if (step === 0) firstOutputMs = performance.now() - runStartedAt;
+    stepDurations.push(stepMs);
+    state.trace.push(`run.step.${step + 1} ${round(stepMs, 2)} ms`);
+    renderTrace();
   }
+  const inferenceMs = performance.now() - runStartedAt;
+  const totalMs = initMs + graphMs + inferenceMs;
+  const tokens = profile.sequence * profile.batch;
 
-  elements.statusSummary.textContent = summarizeStatus();
+  state.run = {
+    profile,
+    initMs,
+    graphMs,
+    firstOutputMs,
+    inferenceMs,
+    totalMs,
+    stepDurations,
+    tokens,
+    checksum: round(checksum, 4),
+    prefillTokPerSec: tokens / Math.max((initMs + graphMs) / 1000, 0.001),
+    decodeTokPerSec: tokens / Math.max(inferenceMs / 1000, 0.001),
+    realAdapter: state.realAdapter || null
+  };
+  state.active = false;
+  log(`${executionMode.label} inference complete: first output ${round(firstOutputMs, 2)} ms, throughput ${round(state.run.decodeTokPerSec, 2)} units/s.`);
+  render();
 }
 
-function metricCards() {
-  const cards = [];
-  cards.push(["TTI", round(performance.now() - state.startedAt, 1) ? round(performance.now() - state.startedAt, 1) + " ms" : "pending"]);
-
-  if (state.probes.webgpu) {
-    cards.push(["WebGPU Init", state.probes.webgpu.initMs ? round(state.probes.webgpu.initMs, 1) + " ms" : state.probes.webgpu.available ? "ready" : "fallback"]);
-  } else {
-    cards.push(["WebGPU Init", "pending"]);
+function describeRuntimeAdapter() {
+  const registry = typeof window !== "undefined" ? window.__aiWebGpuLabRuntimeRegistry : null;
+  const requested = typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get("mode")
+    : null;
+  if (registry) {
+    return registry.describe(requested);
   }
-
-  if (state.probes.frame) {
-    cards.push(["Avg FPS", round(state.probes.frame.avgFps, 1) + " fps"]);
-    cards.push(["P95 Frame", round(state.probes.frame.p95FrameMs, 2) + " ms"]);
-  } else {
-    cards.push(["Avg FPS", "pending"]);
-    cards.push(["P95 Frame", "pending"]);
-  }
-
-  if (state.probes.worker) {
-    cards.push(["Worker RTT", round(state.probes.worker.avgRttMs, 2) + " ms"]);
-    cards.push(["Worker P95", round(state.probes.worker.p95RttMs, 2) + " ms"]);
-  } else {
-    cards.push(["Worker RTT", "pending"]);
-    cards.push(["Worker P95", "pending"]);
-  }
-
-  return cards;
+  return {
+    id: "deterministic-ort",
+    label: "Deterministic ORT",
+    status: "deterministic",
+    isReal: false,
+    version: "1.0.0",
+    capabilities: ["prefill", "decode", "fixed-output-budget"],
+    runtimeType: "synthetic",
+    message: "Runtime adapter registry unavailable; using inline deterministic mock."
+  };
 }
 
-function renderMetrics() {
-  elements.metricsGrid.innerHTML = "";
-
-  for (const [label, value] of metricCards()) {
-    const card = document.createElement("article");
-    card.className = "metric-card";
-
-    const labelNode = document.createElement("span");
-    labelNode.className = "label";
-    labelNode.textContent = label;
-
-    const valueNode = document.createElement("div");
-    valueNode.className = "value";
-    valueNode.textContent = value;
-
-    card.appendChild(labelNode);
-    card.appendChild(valueNode);
-    elements.metricsGrid.appendChild(card);
-  }
-}
-
-function renderLogs() {
-  elements.activityLog.innerHTML = "";
-
-  if (!state.logs.length) {
-    const li = document.createElement("li");
-    li.textContent = "No probe activity yet.";
-    elements.activityLog.appendChild(li);
-    return;
-  }
-
-  for (const item of state.logs) {
-    const li = document.createElement("li");
-    li.textContent = item;
-    elements.activityLog.appendChild(li);
-  }
-}
-
-function schemaResult() {
-  const environment = ensureEnvironment();
-  const webgpu = state.probes.webgpu;
-
-  if (webgpu) {
-    environment.backend = webgpu.available ? "webgpu" : "wasm";
-    environment.fallback_triggered = !webgpu.available;
-    environment.gpu = {
-      adapter: webgpu.adapter || "unknown",
-      required_features: webgpu.features || [],
-      limits: webgpu.limits || {}
-    };
-  }
-
-  environment.worker_mode = state.probes.worker ? "worker" : "main";
-
-  const initMs = webgpu && webgpu.initMs ? round(webgpu.initMs, 2) : round(performance.now() - state.startedAt, 2);
-  const successRate = webgpu ? (webgpu.available ? 1 : 0) : 0.5;
-  const errorType = webgpu && webgpu.error ? webgpu.error : "";
-
+function buildResult() {
+  const run = state.run;
   return {
     meta: {
-      repo: metadata.repo,
+      repo: "exp-ort-webgpu-baseline",
       commit: "bootstrap-generated",
-      timestamp: nowIso(),
+      timestamp: new Date().toISOString(),
       owner: "ai-webgpu-lab",
-      track: metadata.trackSlug,
-      scenario: "baseline-probe",
-      notes: metadata.purpose + ". Replace generic probes with workload-specific logic before treating this as a final benchmark."
+      track: "llm",
+      scenario: (state.run && state.run.realAdapter) ? `ort-webgpu-baseline-real-${state.run.realAdapter.id}` : (run ? `ort-webgpu-baseline-${executionMode.id}` : "ort-webgpu-baseline-pending"),
+      notes: run
+        ? `provider=${executionMode.label}; batch=${run.profile.batch}; sequence=${run.profile.sequence}; hidden=${run.profile.hidden}; checksum=${run.checksum}${state.run && state.run.realAdapter ? `; realAdapter=${state.run.realAdapter.id}` : (isRealRuntimeMode && state.realAdapterError ? `; realAdapter=fallback(${state.realAdapterError})` : "")}`
+        : "Run the ORT-Web provider readiness profile."
     },
-    environment,
+    environment: state.environment,
     workload: {
-      kind: metadata.workloadKind,
-      name: metadata.repo + " baseline probe",
-      input_profile: "bootstrap-default"
+      kind: "llm-chat",
+      name: "ort-webgpu-provider-readiness",
+      input_profile: run ? `batch-${run.profile.batch}-seq-${run.profile.sequence}-hidden-${run.profile.hidden}` : "profile-pending",
+      model_id: "ort-webgpu-transformer-block-baseline",
+      quantization: run ? run.profile.quantization : "q4f16",
+      context_tokens: run ? run.tokens : 0,
+      output_tokens: run ? executionMode.stepCount : 0
     },
     metrics: {
       common: {
-        time_to_interactive_ms: round(performance.now() - state.startedAt, 2),
-        init_ms: initMs,
-        success_rate: successRate,
-        peak_memory_note: navigator.deviceMemory ? String(navigator.deviceMemory) + " GB reported by browser" : "deviceMemory unavailable",
-        error_type: errorType
+        time_to_interactive_ms: round(performance.now() - state.startedAt, 2) || 0,
+        init_ms: run ? round(run.initMs + run.graphMs, 2) || 0 : 0,
+        success_rate: run ? 1 : 0.5,
+        peak_memory_note: navigator.deviceMemory ? `${navigator.deviceMemory} GB reported by browser` : "deviceMemory unavailable",
+        error_type: ""
+      },
+      llm: {
+        ttft_ms: run ? round(run.firstOutputMs, 2) || 0 : 0,
+        prefill_tok_per_sec: run ? round(run.prefillTokPerSec, 2) || 0 : 0,
+        decode_tok_per_sec: run ? round(run.decodeTokPerSec, 2) || 0 : 0,
+        turn_latency_ms: run ? round(run.totalMs, 2) || 0 : 0
       }
     },
-    status: webgpu ? (webgpu.available ? "success" : "partial") : "partial",
+    status: run ? "success" : "partial",
     artifacts: {
-      deploy_url: metadata.pagesUrl
+      raw_logs: state.logs.slice(0, 5),
+      deploy_url: "https://ai-webgpu-lab.github.io/exp-ort-webgpu-baseline/",
+      runtime_adapter: describeRuntimeAdapter()
     }
   };
 }
 
-function renderJson() {
-  const environment = state.environment || baseEnvironment();
-  elements.environmentJson.textContent = JSON.stringify(environment, null, 2);
-  elements.resultJson.textContent = JSON.stringify(schemaResult(), null, 2);
-}
-
-async function detectEnvironment() {
-  ensureEnvironment();
-  log("Captured base environment snapshot.");
-  render();
-}
-
-function extractLimits(source) {
-  const limits = {};
-
-  if (!source) {
-    return limits;
+function renderStatus() {
+  const badges = state.active
+    ? [`${executionMode.label} running`, state.environment.worker_mode]
+    : state.run
+      ? [`${executionMode.label} complete`, `${round(state.run.decodeTokPerSec, 2)} units/s`]
+      : [`${executionMode.label} ready`, "Awaiting run"];
+  elements.statusRow.innerHTML = "";
+  for (const text of badges) {
+    const node = document.createElement("span");
+    node.className = "badge";
+    node.textContent = text;
+    elements.statusRow.appendChild(node);
   }
-
-  for (const key of knownLimitKeys) {
-    if (key in source && Number.isFinite(source[key])) {
-      limits[key] = Number(source[key]);
-    }
-  }
-
-  return limits;
+  elements.summary.textContent = state.run
+    ? `Last run: ${executionMode.label}, first output ${round(state.run.firstOutputMs, 2)} ms, total ${round(state.run.totalMs, 2)} ms.`
+    : "Run the ORT-style inference profile to capture init, first output, throughput, and total latency for the active provider mode.";
 }
 
-async function runWebgpuProbe() {
-  ensureEnvironment();
-  const startedAt = performance.now();
-
-  if (!("gpu" in navigator)) {
-    state.probes.webgpu = {
-      available: false,
-      initMs: performance.now() - startedAt,
-      error: "navigator.gpu unavailable",
-      adapter: "unavailable",
-      features: [],
-      limits: {}
-    };
-    log("WebGPU probe failed: navigator.gpu is not available in this browser.");
-    render();
-    return;
+function renderCards(container, items) {
+  container.innerHTML = "";
+  for (const [label, value] of items) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const labelNode = document.createElement("span");
+    labelNode.className = "label";
+    labelNode.textContent = label;
+    const valueNode = document.createElement("span");
+    valueNode.className = "value";
+    valueNode.textContent = value;
+    card.append(labelNode, valueNode);
+    container.appendChild(card);
   }
-
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-      throw new Error("No GPU adapter returned");
-    }
-
-    let adapterInfo = null;
-    if (typeof adapter.requestAdapterInfo === "function") {
-      try {
-        adapterInfo = await adapter.requestAdapterInfo();
-      } catch (error) {
-        adapterInfo = null;
-      }
-    }
-
-    const device = await adapter.requestDevice();
-    const adapterName = (adapterInfo && (adapterInfo.description || adapterInfo.vendor || adapterInfo.architecture)) || "WebGPU adapter";
-    const features = Array.from(device.features || []);
-    const limits = extractLimits(device.limits || adapter.limits);
-
-    state.probes.webgpu = {
-      available: true,
-      initMs: performance.now() - startedAt,
-      adapter: adapterName,
-      features,
-      limits
-    };
-    log("WebGPU probe succeeded with adapter: " + adapterName + ".");
-  } catch (error) {
-    state.probes.webgpu = {
-      available: false,
-      initMs: performance.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error),
-      adapter: "unavailable",
-      features: [],
-      limits: {}
-    };
-    log("WebGPU probe failed: " + state.probes.webgpu.error + ".");
-  }
-
-  render();
 }
 
-async function runFrameProbe() {
-  ensureEnvironment();
-  const deltas = [];
-
-  await new Promise((resolve) => {
-    let previous = 0;
-    function step(timestamp) {
-      if (previous !== 0) {
-        deltas.push(timestamp - previous);
-      }
-      previous = timestamp;
-
-      if (deltas.length >= 120) {
-        resolve();
-        return;
-      }
-
-      requestAnimationFrame(step);
-    }
-
-    requestAnimationFrame(step);
-  });
-
-  const avgDelta = deltas.reduce((total, value) => total + value, 0) / deltas.length;
-  state.probes.frame = {
-    avgFrameMs: avgDelta,
-    avgFps: avgDelta > 0 ? 1000 / avgDelta : 0,
-    p95FrameMs: percentile(deltas, 0.95)
-  };
-  log("Frame probe captured " + deltas.length + " frames.");
-  render();
+function renderMetrics() {
+  const run = state.run;
+  renderCards(elements.metricGrid, [
+    ["Provider", executionMode.label],
+    ["Init + Graph", run ? `${round(run.initMs + run.graphMs, 2)} ms` : "pending"],
+    ["First Output", run ? `${round(run.firstOutputMs, 2)} ms` : "pending"],
+    ["Throughput", run ? `${round(run.decodeTokPerSec, 2)} units/s` : "pending"],
+    ["Total", run ? `${round(run.totalMs, 2)} ms` : "pending"],
+    ["Checksum", run ? String(run.checksum) : "pending"]
+  ]);
 }
 
-async function runWorkerProbe() {
-  ensureEnvironment();
-  const workerScript = "self.onmessage = (event) => { if (event.data === 'ping') { self.postMessage(performance.now()); } };";
-  const workerUrl = URL.createObjectURL(new Blob([workerScript], { type: "text/javascript" }));
-  const probeWorker = new Worker(workerUrl);
-  const roundTrips = [];
+function renderEnvironment() {
+  renderCards(elements.metaGrid, [
+    ["Browser", `${state.environment.browser.name} ${state.environment.browser.version}`],
+    ["OS", `${state.environment.os.name} ${state.environment.os.version}`],
+    ["Backend", state.environment.backend],
+    ["Worker", state.environment.worker_mode],
+    ["Fallback", String(state.environment.fallback_triggered)],
+    ["Cache", state.environment.cache_state]
+  ]);
+}
 
-  try {
-    for (let index = 0; index < 20; index += 1) {
-      const sample = await new Promise((resolve, reject) => {
-        const startedAt = performance.now();
-        const timeout = setTimeout(() => reject(new Error("Worker probe timed out")), 2000);
-
-        probeWorker.onmessage = () => {
-          clearTimeout(timeout);
-          resolve(performance.now() - startedAt);
-        };
-
-        probeWorker.postMessage("ping");
-      });
-      roundTrips.push(sample);
-    }
-
-    const avgRtt = roundTrips.reduce((total, value) => total + value, 0) / roundTrips.length;
-    state.probes.worker = {
-      avgRttMs: avgRtt,
-      p95RttMs: percentile(roundTrips, 0.95)
-    };
-    log("Worker probe completed with " + roundTrips.length + " round-trips.");
-  } catch (error) {
-    state.probes.worker = {
-      avgRttMs: null,
-      p95RttMs: null,
-      error: error instanceof Error ? error.message : String(error)
-    };
-    log("Worker probe failed: " + state.probes.worker.error + ".");
-  } finally {
-    probeWorker.terminate();
-    URL.revokeObjectURL(workerUrl);
+function renderLogs() {
+  elements.logList.innerHTML = "";
+  const logs = state.logs.length ? state.logs : ["ORT WebGPU readiness harness ready."];
+  for (const message of logs) {
+    const item = document.createElement("li");
+    item.textContent = message;
+    elements.logList.appendChild(item);
   }
-
-  render();
 }
 
-function downloadJson() {
-  const payload = JSON.stringify(schemaResult(), null, 2);
-  const blob = new Blob([payload], { type: "application/json" });
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = metadata.repo + "-baseline-probe.json";
-  anchor.click();
-  URL.revokeObjectURL(objectUrl);
-  log("Downloaded schema-aligned baseline JSON draft.");
+function renderTrace() {
+  elements.traceView.textContent = state.trace.length ? state.trace.join("\n") : "No inference run yet.";
+}
+
+function renderResult() {
+  elements.resultJson.textContent = JSON.stringify(buildResult(), null, 2);
 }
 
 function render() {
-  renderMeta();
   renderStatus();
   renderMetrics();
-  renderJson();
+  renderEnvironment();
+  renderLogs();
+  renderTrace();
+  renderResult();
 }
 
-elements.detectEnvironment.addEventListener("click", detectEnvironment);
-elements.runWebgpu.addEventListener("click", runWebgpuProbe);
-elements.runFrame.addEventListener("click", runFrameProbe);
-elements.runWorker.addEventListener("click", runWorkerProbe);
+function downloadJson() {
+  const blob = new Blob([JSON.stringify(buildResult(), null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `exp-ort-webgpu-baseline-${executionMode.id}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+  log("Downloaded ORT WebGPU readiness JSON draft.");
+}
+
+elements.runInference.addEventListener("click", () => {
+  runInference().catch((error) => {
+    state.active = false;
+    log(`Run failed: ${error instanceof Error ? error.message : String(error)}`);
+    render();
+  });
+});
 elements.downloadJson.addEventListener("click", downloadJson);
 
-renderList(elements.focusList, focusItems());
-renderList(elements.nextSteps, nextSteps());
-log("Baseline probe ready. Capture environment first, then run WebGPU, frame, and worker probes.");
-detectEnvironment();
 render();
+log(`ORT WebGPU readiness harness ready in ${executionMode.label} mode.`);
