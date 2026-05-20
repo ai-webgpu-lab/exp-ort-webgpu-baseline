@@ -1,0 +1,111 @@
+repo=exp-ort-webgpu-baseline
+scenario=ORT Wasm Fallback
+url_search=?mode=fallback
+captured_at=2026-05-20T15:44:47.281Z
+browser=Chromium 147.0.7727.15
+headless=true
+meta_scenario=ort-webgpu-baseline-fallback
+status=success
+
+[page-console]
+(none)
+
+[harness-logs]
+./reports/logs/02-ort-wasm-fallback.log
+
+[result-json]
+{
+  "meta": {
+    "repo": "exp-ort-webgpu-baseline",
+    "commit": "93a915c",
+    "timestamp": "2026-05-20T15:44:47.160Z",
+    "owner": "ai-webgpu-lab",
+    "track": "llm",
+    "scenario": "ort-webgpu-baseline-fallback",
+    "notes": "provider=Wasm Fallback; batch=1; sequence=128; hidden=384; checksum=-248.4516; automation=playwright-chromium",
+    "capture_context": {
+      "tool": "playwright-chromium",
+      "browser_name": "Chromium",
+      "browser_version": "147.0.7727.15",
+      "headless": true,
+      "captured_at": "2026-05-20T15:44:47.281Z",
+      "captured_by": "codex"
+    },
+    "capture_scenario_id": "02-ort-wasm-fallback",
+    "capture_url_search": "?mode=fallback"
+  },
+  "environment": {
+    "browser": {
+      "name": "Chrome",
+      "version": "147.0.7727.15"
+    },
+    "os": {
+      "name": "Linux",
+      "version": "unknown"
+    },
+    "device": {
+      "name": "Linux x86_64",
+      "class": "desktop-high",
+      "cpu": "16 threads",
+      "memory_gb": 32,
+      "power_mode": "unknown"
+    },
+    "gpu": {
+      "adapter": "wasm-fallback-simulated",
+      "required_features": [],
+      "limits": {}
+    },
+    "backend": "wasm",
+    "fallback_triggered": true,
+    "worker_mode": "main",
+    "cache_state": "warm"
+  },
+  "workload": {
+    "kind": "llm-chat",
+    "name": "ort-webgpu-provider-readiness",
+    "input_profile": "batch-1-seq-128-hidden-384",
+    "model_id": "ort-webgpu-transformer-block-baseline",
+    "quantization": "q4f16",
+    "context_tokens": 128,
+    "output_tokens": 12
+  },
+  "metrics": {
+    "common": {
+      "time_to_interactive_ms": 565.1,
+      "init_ms": 167.5,
+      "success_rate": 1,
+      "peak_memory_note": "32 GB reported by browser",
+      "error_type": ""
+    },
+    "llm": {
+      "ttft_ms": 42.3,
+      "prefill_tok_per_sec": 764.18,
+      "decode_tok_per_sec": 458.45,
+      "turn_latency_ms": 446.7
+    }
+  },
+  "status": "success",
+  "artifacts": {
+    "raw_logs": [
+      "./reports/logs/02-ort-wasm-fallback.log"
+    ],
+    "deploy_url": "https://ai-webgpu-lab.github.io/exp-ort-webgpu-baseline/",
+    "runtime_adapter": {
+      "id": "deterministic-mock",
+      "label": "Deterministic Mock",
+      "version": "1.0.0",
+      "capabilities": [
+        "prefill",
+        "decode",
+        "fixed-output-budget"
+      ],
+      "loadType": "synchronous",
+      "isReal": false,
+      "status": "deterministic",
+      "message": "Deterministic harness — replace by registering a real adapter."
+    },
+    "screenshots": [
+      "./reports/screenshots/02-ort-wasm-fallback.png"
+    ]
+  }
+}

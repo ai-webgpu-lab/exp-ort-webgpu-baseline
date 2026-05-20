@@ -1,0 +1,114 @@
+repo=exp-ort-webgpu-baseline
+scenario=ORT WebGPU / Real ORT
+url_search=?mode=real-ort
+captured_at=2026-05-20T15:44:50.068Z
+browser=Chromium 147.0.7727.15
+headless=true
+meta_scenario=ort-webgpu-baseline-webgpu
+status=success
+
+[page-console]
+(none)
+
+[harness-logs]
+./reports/logs/10-ort-webgpu-baseline-real-ort.log
+
+[result-json]
+{
+  "meta": {
+    "repo": "exp-ort-webgpu-baseline",
+    "commit": "93a915c",
+    "timestamp": "2026-05-20T15:44:49.908Z",
+    "owner": "ai-webgpu-lab",
+    "track": "llm",
+    "scenario": "ort-webgpu-baseline-webgpu",
+    "notes": "provider=WebGPU EP; batch=1; sequence=128; hidden=384; checksum=-248.4516; realAdapter=fallback(adapter.loadModel is not a function); automation=playwright-chromium",
+    "capture_context": {
+      "tool": "playwright-chromium",
+      "browser_name": "Chromium",
+      "browser_version": "147.0.7727.15",
+      "headless": true,
+      "captured_at": "2026-05-20T15:44:50.068Z",
+      "captured_by": "codex"
+    },
+    "capture_scenario_id": "10-ort-webgpu-baseline-real-ort",
+    "capture_url_search": "?mode=real-ort"
+  },
+  "environment": {
+    "browser": {
+      "name": "Chrome",
+      "version": "147.0.7727.15"
+    },
+    "os": {
+      "name": "Linux",
+      "version": "unknown"
+    },
+    "device": {
+      "name": "Linux x86_64",
+      "class": "desktop-high",
+      "cpu": "16 threads",
+      "memory_gb": 32,
+      "power_mode": "unknown"
+    },
+    "gpu": {
+      "adapter": "ort-webgpu-simulated-adapter",
+      "required_features": [
+        "shader-f16"
+      ],
+      "limits": {}
+    },
+    "backend": "webgpu",
+    "fallback_triggered": false,
+    "worker_mode": "worker",
+    "cache_state": "warm"
+  },
+  "workload": {
+    "kind": "llm-chat",
+    "name": "ort-webgpu-provider-readiness",
+    "input_profile": "batch-1-seq-128-hidden-384",
+    "model_id": "ort-webgpu-transformer-block-baseline",
+    "quantization": "q4f16",
+    "context_tokens": 128,
+    "output_tokens": 12
+  },
+  "metrics": {
+    "common": {
+      "time_to_interactive_ms": 1141.9,
+      "init_ms": 88.3,
+      "success_rate": 1,
+      "peak_memory_note": "32 GB reported by browser",
+      "error_type": ""
+    },
+    "llm": {
+      "ttft_ms": 18.2,
+      "prefill_tok_per_sec": 1449.6,
+      "decode_tok_per_sec": 1002.35,
+      "turn_latency_ms": 216
+    }
+  },
+  "status": "success",
+  "artifacts": {
+    "raw_logs": [
+      "./reports/logs/10-ort-webgpu-baseline-real-ort.log"
+    ],
+    "deploy_url": "https://ai-webgpu-lab.github.io/exp-ort-webgpu-baseline/",
+    "runtime_adapter": {
+      "id": "ort-webgpu-va-all-minilm-l6-v2-resolve-main-onnx-model-onnx-1200",
+      "label": "ONNX Runtime Web 1.20.0 (webgpu)",
+      "status": "connected",
+      "isReal": true,
+      "version": "1.20.0",
+      "capabilities": [
+        "prefill",
+        "decode",
+        "ort-session",
+        "fixed-output-budget"
+      ],
+      "loadType": "async",
+      "message": "Real runtime adapter 'ort-webgpu-va-all-minilm-l6-v2-resolve-main-onnx-model-onnx-1200' is connected."
+    },
+    "screenshots": [
+      "./reports/screenshots/10-ort-webgpu-baseline-real-ort.png"
+    ]
+  }
+}

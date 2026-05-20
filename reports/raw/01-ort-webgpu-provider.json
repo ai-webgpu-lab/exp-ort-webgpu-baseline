@@ -1,0 +1,97 @@
+{
+  "meta": {
+    "repo": "exp-ort-webgpu-baseline",
+    "commit": "93a915c",
+    "timestamp": "2026-05-20T15:44:44.863Z",
+    "owner": "ai-webgpu-lab",
+    "track": "llm",
+    "scenario": "ort-webgpu-baseline-webgpu",
+    "notes": "provider=WebGPU EP; batch=1; sequence=128; hidden=384; checksum=-248.4516; automation=playwright-chromium",
+    "capture_context": {
+      "tool": "playwright-chromium",
+      "browser_name": "Chromium",
+      "browser_version": "147.0.7727.15",
+      "headless": true,
+      "captured_at": "2026-05-20T15:44:44.997Z",
+      "captured_by": "codex"
+    },
+    "capture_scenario_id": "01-ort-webgpu-provider",
+    "capture_url_search": "?mode=webgpu"
+  },
+  "environment": {
+    "browser": {
+      "name": "Chrome",
+      "version": "147.0.7727.15"
+    },
+    "os": {
+      "name": "Linux",
+      "version": "unknown"
+    },
+    "device": {
+      "name": "Linux x86_64",
+      "class": "desktop-high",
+      "cpu": "16 threads",
+      "memory_gb": 32,
+      "power_mode": "unknown"
+    },
+    "gpu": {
+      "adapter": "ort-webgpu-simulated-adapter",
+      "required_features": [
+        "shader-f16"
+      ],
+      "limits": {}
+    },
+    "backend": "webgpu",
+    "fallback_triggered": false,
+    "worker_mode": "worker",
+    "cache_state": "warm"
+  },
+  "workload": {
+    "kind": "llm-chat",
+    "name": "ort-webgpu-provider-readiness",
+    "input_profile": "batch-1-seq-128-hidden-384",
+    "model_id": "ort-webgpu-transformer-block-baseline",
+    "quantization": "q4f16",
+    "context_tokens": 128,
+    "output_tokens": 12
+  },
+  "metrics": {
+    "common": {
+      "time_to_interactive_ms": 399,
+      "init_ms": 89.5,
+      "success_rate": 1,
+      "peak_memory_note": "32 GB reported by browser",
+      "error_type": ""
+    },
+    "llm": {
+      "ttft_ms": 18.5,
+      "prefill_tok_per_sec": 1430.17,
+      "decode_tok_per_sec": 937.73,
+      "turn_latency_ms": 226
+    }
+  },
+  "status": "success",
+  "artifacts": {
+    "raw_logs": [
+      "./reports/logs/01-ort-webgpu-provider.log"
+    ],
+    "deploy_url": "https://ai-webgpu-lab.github.io/exp-ort-webgpu-baseline/",
+    "runtime_adapter": {
+      "id": "deterministic-mock",
+      "label": "Deterministic Mock",
+      "version": "1.0.0",
+      "capabilities": [
+        "prefill",
+        "decode",
+        "fixed-output-budget"
+      ],
+      "loadType": "synchronous",
+      "isReal": false,
+      "status": "deterministic",
+      "message": "Deterministic harness — replace by registering a real adapter."
+    },
+    "screenshots": [
+      "./reports/screenshots/01-ort-webgpu-provider.png"
+    ]
+  }
+}
